@@ -1,0 +1,234 @@
+# Setup
+import numpy as np
+import pandas as pd
+import matplotlib.pyplot as plt
+import seaborn as sns
+import os
+import time
+import urllib.request
+import zipfile
+import warnings
+warnings.filterwarnings('ignore')
+
+from sklearn.preprocessing import LabelEncoder
+from sklearn.model_selection import train_test_split
+from sklearn.metrics import (classification_report, confusion_matrix,
+                             accuracy_score, precision_score,
+                             recall_score, f1_score)
+
+import tensorflow as tf
+from tensorflow.keras.models import Sequential
+from tensorflow.keras.layers import (Dense, Dropout, Flatten, Conv1D,
+                                      MaxPooling1D, LSTM, Reshape,
+                                      BatchNormalization, Input)
+from tensorflow.keras.callbacks import EarlyStopping, ReduceLROnPlateau
+from tensorflow.keras.utils import to_categorical
+
+# Fixed seeds for reproducibility
+np.random.seed(42)
+tf.random.set_seed(42)
+
+# Output directories
+FIGURES_DIR = './figures'
+os.makedirs(FIGURES_DIR, exist_ok=True)
+
+print(f'TensorFlow version : {tf.__version__}')
+print(f'NumPy version      : {np.__version__}')
+print('All packages loaded successfully!')
+
+
+# Load data
+DATA_URL     = 'https://archive.ics.uci.edu/ml/machine-learning-databases/00240/UCI%20HAR%20Dataset.zip'
+DATA_DIR     = './data'
+ZIP_PATH     = os.path.join(DATA_DIR, 'UCI_HAR_Dataset.zip')
+EXTRACT_PATH = os.path.join(DATA_DIR, 'UCI HAR Dataset')
+SIGNAL_NAMES = [
+    'Body Acc X', 'Body Acc Y', 'Body Acc Z',
+    'Body Gyro X', 'Body Gyro Y', 'Body Gyro Z',
+    'Total Acc X', 'Total Acc Y', 'Total Acc Z'
+]
+
+os.makedirs(DATA_DIR, exist_ok=True)
+
+if not os.path.exists(EXTRACT_PATH):
+    print('Downloading UCI HAR Dataset...')
+    urllib.request.urlretrieve(DATA_URL, ZIP_PATH)
+    print('Download complete. Extracting...')
+    with zipfile.ZipFile(ZIP_PATH, 'r') as z:
+        z.extractall(DATA_DIR)
+    print('Extraction complete!')
+else:
+    print('Dataset already exists locally.')
+
+    
+# Load signals, labels and subjects
+def load_signals(subset, base_path):
+    """
+    Loading all 9 raw inertial sensor signal files for a given subset (train/test).
+    Returns array of shape (n_samples, 128 timesteps, 9 channels).
+    """
+    signal_types = [
+        'body_acc_x', 'body_acc_y', 'body_acc_z',
+        'body_gyro_x', 'body_gyro_y', 'body_gyro_z',
+        'total_acc_x', 'total_acc_y', 'total_acc_z'
+    ]
+    signals = []
+    for sig in signal_types:
+        path = os.path.join(base_path, subset, 'Inertial Signals',
+                            f'{sig}_{subset}.txt')
+        signals.append(
+            pd.read_csv(path, sep=r'\s+', header=None, engine='python').values
+        )
+    return np.transpose(np.array(signals), (1, 2, 0))
+
+def load_labels(subset, base_path):
+    """Loading integer activity labels (1–6) for a given subset."""
+    path = os.path.join(base_path, subset, f'y_{subset}.txt')
+    return pd.read_csv(path, header=None).values.ravel()
+
+def load_subjects(subset, base_path):
+    """Loading subject IDs for cross-user generalization analysis."""
+    path = os.path.join(base_path, subset, f'subject_{subset}.txt')
+    return pd.read_csv(path, header=None).values.ravel()
+
+BASE = EXTRACT_PATH
+
+X_train_raw    = load_signals('train', BASE)
+X_test_raw     = load_signals('test',  BASE)
+y_train_raw    = load_labels('train',  BASE)
+y_test_raw     = load_labels('test',   BASE)
+subjects_train = load_subjects('train', BASE)
+subjects_test  = load_subjects('test',  BASE)
+
+print(f'X_train shape          : {X_train_raw.shape}')  # (7352, 128, 9)
+print(f'X_test  shape          : {X_test_raw.shape}')   # (2947, 128, 9)
+print(f'Unique activity labels : {np.unique(y_train_raw)}')
+print(f'Train subjects         : {np.unique(subjects_train)}')
+print(f'Test subjects          : {np.unique(subjects_test)}')
+
+pd.DataFrame(X_train_raw[0], columns=SIGNAL_NAMES).head()
+
+
+# Preprocessing
+# Missing Value Check
+train_flat = X_train_raw.reshape(X_train_raw.shape[0], -1)
+test_flat  = X_test_raw.reshape(X_test_raw.shape[0], -1)
+
+missing_train = np.isnan(train_flat).sum()
+missing_test  = np.isnan(test_flat).sum()
+print(f'Missing values in training set : {missing_train}')
+print(f'Missing values in test set     : {missing_test}')
+print('=> No imputation needed.\n' if missing_train == 0 and missing_test == 0
+      else '=> Missing values detected — imputation required.\n')
+
+#Scaling Check 
+print(f'Training set value range : [{X_train_raw.min():.4f}, {X_train_raw.max():.4f}]')
+print(f'Test set value range     : [{X_test_raw.min():.4f},  {X_test_raw.max():.4f}]')
+print('=> Z-score normalization will be applied per channel.\n')
+
+# Label Encoding Check 
+print(f'Unique raw labels (train) : {np.unique(y_train_raw)}  (1-based integers)')
+print(f'Unique raw labels (test)  : {np.unique(y_test_raw)}')
+print('=> Labels will be encoded to 0-based integers and one-hot encoded for Keras.\n')
+
+# Z-score Normalization (using training set statistics only)
+mean = X_train_raw.mean(axis=(0, 1), keepdims=True)
+std  = X_train_raw.std(axis=(0, 1),  keepdims=True) + 1e-8
+
+X_train_norm = (X_train_raw - mean) / std
+X_test_norm  = (X_test_raw  - mean) / std
+
+# Label Encoding: 1–6 → 0–5 → one-hot 
+le = LabelEncoder()
+y_train_enc = le.fit_transform(y_train_raw)
+y_test_enc  = le.transform(y_test_raw)
+NUM_CLASSES = len(le.classes_)
+
+y_train_oh = to_categorical(y_train_enc, NUM_CLASSES)
+y_test_oh  = to_categorical(y_test_enc,  NUM_CLASSES)
+
+# Validation Split: stratified 85-15 
+X_train, X_val, y_train, y_val = train_test_split(
+    X_train_norm, y_train_oh,
+    test_size=0.15, random_state=42, stratify=y_train_enc
+)
+
+print(f'Number of classes : {NUM_CLASSES}')
+print(f'Train set         : {X_train.shape[0]} samples')
+print(f'Validation set    : {X_val.shape[0]} samples')
+print(f'Test set          : {X_test_norm.shape[0]} samples')
+print(f'Input shape       : {X_train.shape[1:]}  (128 timesteps x 9 channels)')
+
+
+# Define model parameters
+TIMESTEPS  = X_train.shape[1]   # 128
+FEATURES   = X_train.shape[2]   # 9
+EPOCHS     = 50
+BATCH_SIZE = 64
+
+def get_callbacks():
+    """Early stopping + learning rate reduction callbacks shared across all models."""
+    return [
+        EarlyStopping(monitor='val_loss', patience=10,
+                      restore_best_weights=True, verbose=0),
+        ReduceLROnPlateau(monitor='val_loss', factor=0.5,
+                          patience=5, verbose=0)
+    ]
+
+
+# Define combined CNN/LSTM
+# Stage 1: Two Conv1D blocks reducing the 128-step signal to 32 feature-rich steps.
+# Stage 2: Reshaping groups every 4 CNN outputs into one LSTM super-step (8 total).
+# Stage 3: LSTM layers learn temporal patterns across those 8 super-steps.
+# This two-stage design captures both local spatial patterns and global temporal context.
+
+def build_cnn_lstm(timesteps, features, num_classes):
+    model = Sequential([
+        Input(shape=(timesteps, features)),
+
+        # Spatial feature extraction
+        Conv1D(64, kernel_size=3, activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling1D(pool_size=2),   # → (64, 64)
+        Dropout(0.3),
+
+        Conv1D(128, kernel_size=3, activation='relu', padding='same'),
+        BatchNormalization(),
+        MaxPooling1D(pool_size=2),   # → (32, 128)
+        Dropout(0.3),
+
+        # Reshape: 32 CNN steps → 8 LSTM super-steps of 512 features each
+        Reshape((8, 4 * 128)),
+
+        # Temporal modeling
+        LSTM(128, return_sequences=True),
+        Dropout(0.3),
+        LSTM(64, return_sequences=False),
+        Dropout(0.3),
+
+        Dense(64, activation='relu'),
+        Dropout(0.3),
+        Dense(num_classes, activation='softmax')
+    ], name='CNN_LSTM')
+
+    model.compile(optimizer='adam',
+                  loss='categorical_crossentropy',
+                  metrics=['accuracy'])
+    return model
+
+cnn_lstm_model = build_cnn_lstm(TIMESTEPS, FEATURES, NUM_CLASSES)
+cnn_lstm_model.summary()
+
+
+# Train CNN/lSTM
+print('=' * 55)
+print('Training CNN-LSTM...')
+print('=' * 55)
+cnn_lstm_history = cnn_lstm_model.fit(
+    X_train, y_train,
+    epochs=EPOCHS,
+    batch_size=32,
+    validation_data=(X_val, y_val),
+    callbacks=get_callbacks(),
+    verbose=1
+)
