@@ -38,4 +38,5 @@ The dataset used in this project is the Human Activity Recognition Using Smartph
     * cnn_lstm_out.txt: CNN/LSTM hybrid model results (GPU)
     * cnn_out.txt: CNN model results (GPU)
     * lstm_out.txt: LSTM model results (GPU)
+* CS5841_Final_Report.pdf: Our project report
 * final-project.py: Main analysis notebook, containing all data processing, EDA, and model training and evaluation on CPU
