@@ -48,6 +48,11 @@ SIGNAL_NAMES = [
     'Total Acc X', 'Total Acc Y', 'Total Acc Z'
 ]
 
+CLASS_NAMES = [
+    'Walking', 'Walking Upstairs', 'Walking Downstairs',
+    'Sitting', 'Standing', 'Laying'
+]
+
 os.makedirs(DATA_DIR, exist_ok=True)
 
 if not os.path.exists(BASE):
@@ -161,7 +166,7 @@ print(f'Input shape       : {X_train.shape[1:]}  (128 timesteps x 9 channels)')
 TIMESTEPS  = X_train.shape[1]   # 128
 FEATURES   = X_train.shape[2]   # 9
 EPOCHS     = 50
-BATCH_SIZE = 64
+BATCH_SIZE = 32
 
 def get_callbacks():
     """Early stopping + learning rate reduction callbacks shared across all models."""
@@ -218,8 +223,31 @@ print('=' * 55)
 cnn_history = cnn_model.fit(
     X_train, y_train,
     epochs=EPOCHS,
-    batch_size=32,
+    batch_size=BATCH_SIZE,
     validation_data=(X_val, y_val),
     callbacks=get_callbacks(),
     verbose=1
 )
+
+# Evaluate on the test set
+def evaluate_model(model, X_test, y_test_enc, model_name):
+    
+    y_pred = np.argmax(model.predict(X_test, verbose=0), axis=1)
+
+    acc  = accuracy_score(y_test_enc,  y_pred)
+    prec = precision_score(y_test_enc, y_pred, average='weighted')
+    rec  = recall_score(y_test_enc,    y_pred, average='weighted')
+    f1   = f1_score(y_test_enc,        y_pred, average='weighted')
+
+    print(f'\n{"-" * 55}')
+    print(f'  Model     : {model_name}')
+    print(f'  Accuracy  : {acc:.4f}')
+    print(f'  Precision : {prec:.4f}')
+    print(f'  Recall    : {rec:.4f}')
+    print(f'  F1-Score  : {f1:.4f}')
+    print(f'{"-" * 55}')
+    print(classification_report(y_test_enc, y_pred, target_names=CLASS_NAMES))
+
+    return y_pred, {'Accuracy': acc, 'Precision': prec, 'Recall': rec, 'F1-Score': f1}
+
+y_pred, metrics = evaluate_model(cnn_model, X_test_norm, y_test_enc, 'CNN')
